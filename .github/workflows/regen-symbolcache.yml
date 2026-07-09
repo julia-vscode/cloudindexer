@@ -1,0 +1,110 @@
+name: Regenerate symbol cache
+
+# Daily incremental symbol-cache regeneration.
+#
+# Clones the latest JuliaWorkspaces.jl and runs its
+# scripts/regen_symbolcache.sh against the Cloudflare R2 bucket. In
+# incremental mode the script downloads the existing index + tombstones from
+# R2, skips everything already cached, and only indexes genuinely new package
+# versions -- so the daily cost stays bounded once the cache is seeded.
+#
+# Runs on a self-hosted runner (label: cloudindexer). See
+# docs/self-hosted-runner.md for runner prerequisites and setup.
+
+on:
+  schedule:
+    # 03:00 UTC daily.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Regen mode"
+        type: choice
+        default: incremental
+        options:
+          - incremental
+          - full
+      sweep_args:
+        description: "Args forwarded to the sweep (jwcloudindex), after --"
+        type: string
+        default: "--newest 3"
+
+# Single-flight: the regen script assumes the scheduler serializes runs.
+concurrency:
+  group: regen-symbolcache
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  regen:
+    runs-on: [self-hosted, cloudindexer]
+    timeout-minutes: 720
+    env:
+      JW_REF: main
+      R2_BUCKET: ${{ vars.R2_BUCKET || 'symbolcache' }}
+      REGEN_MODE: ${{ inputs.mode || 'incremental' }}
+      SWEEP_ARGS: ${{ inputs.sweep_args || '--newest 3' }}
+      # Define the rclone `r2:` remote via env vars instead of a config file --
+      # rclone reads RCLONE_CONFIG_<NAME>_<KEY> for a remote named <NAME>.
+      RCLONE_CONFIG_R2_TYPE: s3
+      RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+      RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      RCLONE_CONFIG_R2_REGION: auto
+      # R2 has no bucket-region concept and rclone may lack CreateBucket perms.
+      RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+      RCLONE_CONFIG_R2_ACL: private
+    steps:
+      - name: Clone latest JuliaWorkspaces.jl
+        run: |
+          set -euo pipefail
+          rm -rf JuliaWorkspaces.jl
+          git clone --depth 1 --branch "$JW_REF" \
+            https://github.com/julia-vscode/JuliaWorkspaces.jl.git JuliaWorkspaces.jl
+          echo "JW_DIR=$PWD/JuliaWorkspaces.jl" >> "$GITHUB_ENV"
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          # Matches the checked-in Manifest (julia_version = 1.12.5).
+          version: "1.12"
+
+      - name: Install rclone and jq
+        run: |
+          set -euo pipefail
+          # rclone from apt needs >= 1.59 for `provider = Cloudflare` (Ubuntu
+          # 24.04 / Debian 12 are fine; older releases ship 1.53).
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends rclone jq
+          rclone version
+          jq --version
+
+      - name: Verify R2 credentials are set
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${R2_ACCESS_KEY_ID:-}" || -z "${R2_SECRET_ACCESS_KEY:-}" || -z "${R2_ACCOUNT_ID:-}" ]]; then
+            echo "Missing R2 secrets (R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ACCOUNT_ID)" >&2
+            exit 1
+          fi
+
+      - name: Instantiate package project
+        run: |
+          set -euo pipefail
+          julia --project="$JW_DIR" -e 'using Pkg; Pkg.instantiate()'
+
+      - name: Run symbol-cache regen
+        run: |
+          set -euo pipefail
+          echo "mode=$REGEN_MODE remote=r2:$R2_BUCKET sweep_args=$SWEEP_ARGS"
+          bash "$JW_DIR/scripts/regen_symbolcache.sh" \
+            --remote "r2:$R2_BUCKET" \
+            --mode "$REGEN_MODE" \
+            -- $SWEEP_ARGS
