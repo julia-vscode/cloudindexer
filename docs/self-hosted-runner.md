@@ -67,14 +67,32 @@ Optional repository **variable**:
 | --- | --- | --- |
 | `R2_BUCKET` | `symbolcache` | R2 bucket name; the rclone remote passed to the script is `r2:<R2_BUCKET>`. |
 
+## Concurrency and container resource limits
+
+The sweep runs each package/version in its own Docker worker, capped at
+`--cpus=2 --memory=4g`. On the 32-vCPU / 64-GB runner that fits ~16 workers, so
+the default worker count (`JOBS`) is 12, leaving headroom for the host + driver.
+
+Those `docker run` limits are only enforced under specific conditions. In
+particular, **rootless Docker and Docker-in-Docker** apply cgroup limits only
+with cgroup v2, the systemd cgroup driver, and the relevant controllers
+delegated to the daemon's cgroup; otherwise `--memory` is silently ignored. If
+the memory cap doesn't bind, 12 unbounded workers can exhaust the host's 64 GB
+and trigger OOM kills (surfacing as failed/tombstoned versions).
+
+To guard against that, the **Preflight** step launches a canary container with
+`--memory=64m` and reads back the effective limit. If it isn't enforced, the
+step emits a warning and **caps `JOBS` at 4** for that run. Check the
+`docker info` output in that step if you want to fix the underlying delegation
+so full concurrency is available.
+
 ## Schedule and manual runs
 
-- **Scheduled:** daily at 03:00 UTC, `--mode incremental` with sweep args
-  `--newest 3 --jobs 12` (12 parallel workers sized for the 32-vCPU / 64-GB
-  runner; each worker container is capped at 2 vCPU / 4 GB).
+- **Scheduled:** daily at 03:00 UTC, `--mode incremental`, `JOBS=12`, sweep args
+  `--newest 3` (subject to the preflight cap above).
 - **Manual:** use **Run workflow** (`workflow_dispatch`) to override `mode`
-  (`incremental` / `full`) and `sweep_args` — e.g. `--newest 3 --per-break` for
-  a heavier sweep, or a wider `--include` pattern.
+  (`incremental` / `full`), `jobs` (worker count), and `sweep_args` — e.g.
+  `--newest 3 --per-break` for a heavier sweep, or a wider `--include` pattern.
 
 Runs are serialized by an Actions `concurrency` group (`regen-symbolcache`), so
 a new run never overlaps one already in progress.
