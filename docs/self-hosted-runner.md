@@ -5,7 +5,8 @@ workflow runs daily on a **self-hosted** GitHub Actions runner. It clones the
 latest `julia-vscode/JuliaWorkspaces.jl` and runs its
 `scripts/regen_symbolcache.sh` against the Cloudflare R2 bucket.
 
-The runner does not exist yet — this document describes how to provision it.
+The workflow targets the org-wide self-hosted runner group
+**`cloudindexer-self-hosted-32vcpu-64gb`** (via `runs-on: { group: ... }`).
 
 ## Why self-hosted
 
@@ -31,20 +32,18 @@ to be preinstalled. Everything else must be present:
 `julia` is provided per-run by `julia-actions/setup-julia` (pinned to 1.12,
 matching the JuliaWorkspaces Manifest), so juliaup on the host is optional.
 
-## Runner registration
+## Runner group
 
-Register the runner against the `cloudindexer` repository with the
-`cloudindexer` label (the workflow targets `runs-on: [self-hosted, cloudindexer]`):
+The workflow uses the org-wide runner group
+`cloudindexer-self-hosted-32vcpu-64gb`, so no per-repo runner registration is
+needed. The remaining setup is granting access:
 
-1. In GitHub: **Settings → Actions → Runners → New self-hosted runner**, pick
-   Linux/x64, and follow the download + `./config.sh` instructions.
-2. When prompted for labels, add `cloudindexer`.
-3. Run it as a service so it survives reboots:
-   ```bash
-   sudo ./svc.sh install
-   sudo ./svc.sh start
-   ```
-4. Confirm the runner user can reach Docker: `docker run --rm hello-world`.
+1. In the org: **Settings → Actions → Runner groups →
+   `cloudindexer-self-hosted-32vcpu-64gb`**, ensure the `cloudindexer`
+   repository is in the group's list of allowed repositories.
+2. Confirm the runners in the group satisfy the host prerequisites above
+   (Docker daemon reachable — `docker run --rm hello-world`, passwordless
+   `sudo`, disk space).
 
 ## Required secrets
 
@@ -71,7 +70,8 @@ Optional repository **variable**:
 ## Schedule and manual runs
 
 - **Scheduled:** daily at 03:00 UTC, `--mode incremental` with sweep args
-  `--newest 3`.
+  `--newest 3 --jobs 12` (12 parallel workers sized for the 32-vCPU / 64-GB
+  runner; each worker container is capped at 2 vCPU / 4 GB).
 - **Manual:** use **Run workflow** (`workflow_dispatch`) to override `mode`
   (`incremental` / `full`) and `sweep_args` — e.g. `--newest 3 --per-break` for
   a heavier sweep, or a wider `--include` pattern.

@@ -27,7 +27,7 @@ on:
       sweep_args:
         description: "Args forwarded to the sweep (jwcloudindex), after --"
         type: string
-        default: "--newest 3"
+        default: "--newest 3 --jobs 12"
 
 # Single-flight: the regen script assumes the scheduler serializes runs.
 concurrency:
@@ -39,13 +39,18 @@ permissions:
 
 jobs:
   regen:
-    runs-on: [self-hosted, cloudindexer]
+    # Org-wide self-hosted runner group (32 vCPU / 64 GB).
+    runs-on:
+      group: cloudindexer-self-hosted-32vcpu-64gb
     timeout-minutes: 720
     env:
       JW_REF: main
       R2_BUCKET: ${{ vars.R2_BUCKET || 'symbolcache' }}
       REGEN_MODE: ${{ inputs.mode || 'incremental' }}
-      SWEEP_ARGS: ${{ inputs.sweep_args || '--newest 3' }}
+      # Each worker container is limited to --cpus=2 --memory=4g, so the
+      # 32-vCPU / 64-GB runner fits ~16 workers; 12 leaves headroom for the
+      # host + driver.
+      SWEEP_ARGS: ${{ inputs.sweep_args || '--newest 3 --jobs 12' }}
       # Define the rclone `r2:` remote via env vars instead of a config file --
       # rclone reads RCLONE_CONFIG_<NAME>_<KEY> for a remote named <NAME>.
       RCLONE_CONFIG_R2_TYPE: s3
