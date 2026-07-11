@@ -25,7 +25,7 @@ on:
           - incremental
           - full
       jobs:
-        description: "Max concurrent sweep workers (auto-capped to 4 if container memory limits aren't enforced)"
+        description: "Max concurrent sweep workers (auto-capped to 2 if container memory limits aren't enforced)"
         type: string
         default: "12"
       sweep_args:
@@ -46,7 +46,7 @@ jobs:
     # Org-wide self-hosted runner group (32 vCPU / 64 GB).
     runs-on:
       group: cloudindexer-self-hosted-32vcpu-64gb
-    timeout-minutes: 720
+    timeout-minutes: 1440
     env:
       JW_REF: main
       R2_BUCKET: ${{ vars.R2_BUCKET || 'symbolcache' }}
@@ -54,7 +54,7 @@ jobs:
       SWEEP_ARGS: ${{ inputs.sweep_args || '--newest 3' }}
       # Requested worker concurrency. Each worker container is capped at
       # --cpus=2 --memory=4g, so the 32-vCPU / 64-GB runner fits ~16; 12 leaves
-      # headroom for the host + driver. The preflight step lowers this to 4 if
+      # headroom for the host + driver. The preflight step lowers this to 2 if
       # those container memory limits aren't actually enforced (rootless / DinD
       # without cgroup delegation), to avoid host OOM from unbounded workers.
       JOBS: ${{ inputs.jobs || '12' }}
@@ -132,12 +132,12 @@ jobs:
           if [[ "$limit" == "67108864" ]]; then
             echo "Container memory limits ARE enforced; keeping JOBS=$JOBS."
           else
-            echo "::warning title=Container memory limits not enforced::--memory did not bind (got '$limit'); capping concurrent workers to 4 to avoid host OOM."
-            if (( JOBS > 4 )); then
-              echo "JOBS=4" >> "$GITHUB_ENV"
-              echo "Lowered JOBS from $JOBS to 4."
+            echo "::warning title=Container memory limits not enforced::--memory did not bind (got '$limit'); capping concurrent workers to 2 to avoid host OOM."
+            if (( JOBS > 2 )); then
+              echo "JOBS=2" >> "$GITHUB_ENV"
+              echo "Lowered JOBS from $JOBS to 2."
             else
-              echo "Requested JOBS=$JOBS already <= 4; leaving as-is."
+              echo "Requested JOBS=$JOBS already <= 2; leaving as-is."
             fi
           fi
 

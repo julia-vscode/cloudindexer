@@ -82,7 +82,7 @@ and trigger OOM kills (surfacing as failed/tombstoned versions).
 
 To guard against that, the **Preflight** step launches a canary container with
 `--memory=64m` and reads back the effective limit. If it isn't enforced, the
-step emits a warning and **caps `JOBS` at 4** for that run. Check the
+step emits a warning and **caps `JOBS` at 2** for that run. Check the
 `docker info` output in that step if you want to fix the underlying delegation
 so full concurrency is available.
 
