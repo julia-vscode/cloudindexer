@@ -16,27 +16,14 @@
 #     workers are charged to the pod's cgroup, so per-worker 4g caps can hold
 #     while the sum blows the pod limit).
 #
-# Each tick also (re)applies an oom_score_adj policy so that when the kernel
-# does have to kill something, it prefers sweep workers over the orchestrator:
-#
-#   runner agent / dockerd / containerd -> -900
-#   regen driver (script + host julia)  -> -400
-#   worker containers (DinD julia)      -> +500
-#
-# Lowering oom_score_adj needs CAP_SYS_RESOURCE (usually present since DinD
-# pods run privileged); if unavailable that's logged once and only the
-# worker-raising half applies. None of this helps against kubelet eviction,
-# which selects whole pods and ignores OOM scores.
-#
-# The policy mutates system state, so it only runs when the caller sets
-# MEMDIAG_APPLY_OOM_POLICY=1 (the workflow does); anywhere else the script is
-# observe-only and safe to run.
+# The script is observe-only. (An oom_score_adj policy protecting the
+# orchestrator was tried and removed: the runner pod is Burstable QoS without
+# CAP_SYS_RESOURCE, so kubelet pins oom_score_adj and lowering always fails.)
 
 set -u
 
 INTERVAL="${MEMDIAG_INTERVAL:-60}"
 DETAIL_EVERY="${MEMDIAG_DETAIL_EVERY:-10}"
-APPLY_POLICY="${MEMDIAG_APPLY_OOM_POLICY:-0}"
 
 log() { echo "[memdiag] $*"; }
 
@@ -54,45 +41,6 @@ gib() {
     else if (b+0 >= 2^60) printf "unlimited"
     else printf "%.1fGi", b/1073741824
   }'
-}
-
-# set_adj PID VALUE LABEL — idempotent, logs only changes and failures.
-set_adj() {
-  local pid="$1" val="$2" label="$3" cur
-  cur="$(cat "/proc/$pid/oom_score_adj" 2>/dev/null)" || return 0
-  [[ "$cur" == "$val" ]] && return 0
-  if echo "$val" | sudo -n tee "/proc/$pid/oom_score_adj" >/dev/null 2>&1; then
-    log "oom_score_adj: $label pid=$pid $cur -> $val"
-  else
-    log "oom_score_adj: FAILED $label pid=$pid $cur -> $val"
-  fi
-}
-
-apply_oom_policy() {
-  local pid
-  # Orchestrator infrastructure: killing any of these takes down the whole
-  # run (dockerd death kills every worker; runner death loses the job).
-  for pat in 'Runner.Listener' 'Runner.Worker' 'Runner.PluginHost' dockerd containerd; do
-    for pid in $(pgrep -f "$pat" 2>/dev/null); do
-      set_adj "$pid" -900 "$pat"
-    done
-  done
-  for pid in $(pgrep -f 'regen_symbolcache.sh' 2>/dev/null); do
-    set_adj "$pid" -400 "regen-driver"
-  done
-  # julia outside a docker cgroup is the sweep driver; inside one it's a
-  # worker and the preferred OOM victim.
-  for pid in $(pgrep -x julia 2>/dev/null); do
-    if grep -q docker "/proc/$pid/cgroup" 2>/dev/null; then
-      set_adj "$pid" 500 "worker-julia"
-    else
-      set_adj "$pid" -400 "driver-julia"
-    fi
-  done
-  # Worker containers' init processes, in case the entrypoint isn't `julia`.
-  for pid in $(docker ps -q 2>/dev/null | xargs -r docker inspect --format '{{.State.Pid}}' 2>/dev/null); do
-    set_adj "$pid" 500 "worker-container"
-  done
 }
 
 snapshot_line() {
@@ -127,23 +75,9 @@ log "started (pid $$, interval ${INTERVAL}s, detail every $DETAIL_EVERY ticks)"
 log "cgroup membership: $(tr '\n' ' ' </proc/self/cgroup 2>/dev/null)"
 log "container memory.max: $(gib "$(cg_read memory.max memory.limit_in_bytes)")"
 log "dmesg readable from pod: $DMESG_OK"
-if [[ "$APPLY_POLICY" == 1 ]]; then
-  cur="$(cat /proc/self/oom_score_adj 2>/dev/null || echo 0)"
-  if echo $((cur - 1)) | sudo -n tee /proc/self/oom_score_adj >/dev/null 2>&1; then
-    echo "$cur" | sudo -n tee /proc/self/oom_score_adj >/dev/null 2>&1
-    log "can lower oom_score_adj: yes"
-  else
-    log "can lower oom_score_adj: NO (missing CAP_SYS_RESOURCE?) — orchestrator protection unavailable, only raising worker scores"
-  fi
-else
-  log "observe-only: MEMDIAG_APPLY_OOM_POLICY != 1, not touching oom_score_adj"
-fi
 
 tick=0
 while :; do
-  if [[ "$APPLY_POLICY" == 1 ]]; then
-    apply_oom_policy
-  fi
   snapshot_line
   if ((tick % DETAIL_EVERY == 0)); then
     snapshot_detail
