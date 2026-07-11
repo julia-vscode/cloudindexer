@@ -58,6 +58,13 @@ jobs:
       # those container memory limits aren't actually enforced (rootless / DinD
       # without cgroup delegation), to avoid host OOM from unbounded workers.
       JOBS: ${{ inputs.jobs || '12' }}
+      # Worker containers forward this (name-only -e in JuliaWorkspaces'
+      # run_cloudindex_docker.sh), so each worker's GC targets ~3 GiB even when
+      # the docker --memory=4g cap doesn't bind (rootless / DinD without cgroup
+      # delegation) and Julia would otherwise size its heap against the whole
+      # node. The driver julia sees the same hint, which is fine -- it stays
+      # well under 3 GiB.
+      JULIA_HEAP_SIZE_HINT: "3G"
       # Define the rclone `r2:` remote via env vars instead of a config file --
       # rclone reads RCLONE_CONFIG_<NAME>_<KEY> for a remote named <NAME>.
       RCLONE_CONFIG_R2_TYPE: s3
