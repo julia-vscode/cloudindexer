@@ -86,6 +86,39 @@ step emits a warning and **caps `JOBS` at 4** for that run. Check the
 `docker info` output in that step if you want to fix the underlying delegation
 so full concurrency is available.
 
+## Termination diagnostics
+
+Runs have died with GitHub's "runner lost communication" annotation — the
+runner pod (on Kubernetes) was terminated from outside. There are three
+distinct mechanisms, each with a different fingerprint in the regen step's
+live log (GitHub retains streamed lines even when the pod dies mid-step):
+
+| Mechanism | Signal | Fingerprint in the log |
+| --- | --- | --- |
+| kubelet node-pressure eviction | SIGTERM, then SIGKILL | "received SIGTERM" from the regen step's trap, with `node_avail` collapsing in the preceding `[memdiag]` snapshots |
+| node drain / scale-down / pod deletion | SIGTERM, then SIGKILL | "received SIGTERM" but `node_avail` healthy — memory wasn't the trigger |
+| kernel OOM kill (node- or pod-cgroup-level) | SIGKILL only | log stops abruptly, no trap message; `cg_oom_kills` incrementing means pod-cgroup kills, `node_avail` near zero means node-level; dmesg lines (if readable) show `CONSTRAINT_MEMCG` vs `CONSTRAINT_NONE` |
+
+`scripts/memdiag.sh` runs in the background *inside* the regen step, sharing
+its stdout, and prints a compact snapshot every 60 s (node `MemAvailable`,
+pod-cgroup usage/limit, cgroup `oom_kill` counter, worker count, memory PSI)
+plus a detail block every 10 min (top-RSS processes with OOM scores, per-worker
+`docker stats`). A `Collect memory diagnostics` step dumps `memory.events` and
+kernel OOM lines whenever the runner survives to the end.
+
+The monitor also continuously applies an OOM-score policy so the kernel
+prefers reaping sweep workers over the orchestrator: runner agent, `dockerd`,
+and `containerd` get `oom_score_adj=-900`, the regen driver `-400`, and worker
+containers `+500`. Lowering scores needs `CAP_SYS_RESOURCE` (present in
+privileged DinD pods); if unavailable the monitor logs that once and only the
+worker-raising half applies. Note this doesn't help against kubelet eviction,
+which selects whole pods and ignores OOM scores.
+
+Under DinD the workers' memory is charged to the *pod's* cgroup, so per-worker
+`--memory=4g` caps can each pass the preflight canary while the sum blows the
+pod limit. The regen step checks `JOBS × 4 GiB + 4 GiB` overhead against the
+visible cgroup limit and emits a workflow warning when the budget doesn't fit.
+
 ## Schedule and manual runs
 
 - **Scheduled:** daily at 03:00 UTC, `--mode incremental`, `JOBS=12`, sweep args

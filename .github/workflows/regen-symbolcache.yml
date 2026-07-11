@@ -70,6 +70,10 @@ jobs:
       RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
       RCLONE_CONFIG_R2_ACL: private
     steps:
+      # For scripts/memdiag.sh; previous runs didn't need the repo itself.
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Clone latest JuliaWorkspaces.jl
         run: |
           set -euo pipefail
@@ -145,7 +149,61 @@ jobs:
         run: |
           set -euo pipefail
           echo "mode=$REGEN_MODE remote=r2:$R2_BUCKET jobs=$JOBS sweep_args=$SWEEP_ARGS"
+
+          # Sanity-check the concurrency budget against the pod/container
+          # cgroup limit: JOBS workers at 4 GiB each, plus ~4 GiB for the
+          # driver, dockerd, and the runner agent. Under DinD the workers'
+          # memory is charged to this pod's cgroup, so exceeding this means a
+          # pod-level OOM kill is likely even though the preflight canary
+          # passed for each individual worker.
+          limit="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)"
+          if [[ "$limit" =~ ^[0-9]+$ ]]; then
+            need=$(( (JOBS * 4 + 4) * 1024 * 1024 * 1024 ))
+            echo "cgroup memory limit: $limit bytes; worst-case need: $need bytes (JOBS=$JOBS x 4GiB + 4GiB overhead)"
+            if (( need > limit )); then
+              echo "::warning title=Worker budget exceeds pod memory limit::JOBS=$JOBS workers at 4GiB each (+4GiB overhead) needs $need bytes but the pod cgroup allows $limit; expect pod-level cgroup OOM kills (CONSTRAINT_MEMCG) under load."
+            fi
+          else
+            echo "cgroup memory limit: $limit — no pod-level cap visible; node-level OOM or kubelet eviction are the relevant risks."
+          fi
+
+          # Background monitor sharing this step's stdout: GitHub retains
+          # live-streamed lines even when the runner pod dies mid-step, so the
+          # snapshots leading up to a termination survive in the run's log.
+          chmod +x scripts/memdiag.sh
+          MEMDIAG_APPLY_OOM_POLICY=1 scripts/memdiag.sh &
+          memdiag_pid=$!
+
+          # Distinguish graceful external termination (kubelet eviction, node
+          # drain, and pod deletion deliver SIGTERM) from the OOM killer's
+          # untrappable SIGKILL. The regen runs in the background because bash
+          # defers trap handlers while a foreground child is running.
+          on_signal() {
+            echo "::warning title=Regen interrupted::received SIG$1 — graceful external termination (kubelet eviction, node drain/scale-down, pod deletion, or cancellation), not an OOM kill. Check memdiag node_avail: collapsing means eviction, healthy means infra churn."
+            echo "$(date -u +%FT%TZ) regen step received SIG$1; node $(grep MemAvailable /proc/meminfo)"
+            kill -TERM "$child" 2>/dev/null || true
+            kill "$memdiag_pid" 2>/dev/null || true
+            exit 143
+          }
+          trap 'on_signal TERM' TERM
+          trap 'on_signal INT' INT
+
           bash "$JW_DIR/scripts/regen_symbolcache.sh" \
             --remote "r2:$R2_BUCKET" \
             --mode "$REGEN_MODE" \
-            -- $SWEEP_ARGS --jobs "$JOBS"
+            -- $SWEEP_ARGS --jobs "$JOBS" &
+          child=$!
+          status=0
+          wait "$child" || status=$?
+          kill "$memdiag_pid" 2>/dev/null || true
+          exit "$status"
+
+      - name: Collect memory diagnostics
+        if: always()
+        run: |
+          set -uo pipefail
+          echo "== cgroup memory.events (oom_kill > 0 means in-pod cgroup OOM kills) =="
+          cat /sys/fs/cgroup/memory.events 2>/dev/null || echo "(cgroup v2 memory.events not available)"
+          echo
+          echo "== kernel OOM lines (CONSTRAINT_NONE = node OOM, CONSTRAINT_MEMCG = cgroup OOM) =="
+          dmesg 2>/dev/null | grep -iE 'invoked oom-killer|oom-kill:|Out of memory' | tail -n 20 || echo "(dmesg not readable from pod)"
