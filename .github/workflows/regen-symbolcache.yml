@@ -171,7 +171,7 @@ jobs:
           # live-streamed lines even when the runner pod dies mid-step, so the
           # snapshots leading up to a termination survive in the run's log.
           chmod +x scripts/memdiag.sh
-          MEMDIAG_APPLY_OOM_POLICY=1 scripts/memdiag.sh &
+          scripts/memdiag.sh &
           memdiag_pid=$!
 
           # Distinguish graceful external termination (kubelet eviction, node

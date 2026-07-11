@@ -106,13 +106,11 @@ plus a detail block every 10 min (top-RSS processes with OOM scores, per-worker
 `docker stats`). A `Collect memory diagnostics` step dumps `memory.events` and
 kernel OOM lines whenever the runner survives to the end.
 
-The monitor also continuously applies an OOM-score policy so the kernel
-prefers reaping sweep workers over the orchestrator: runner agent, `dockerd`,
-and `containerd` get `oom_score_adj=-900`, the regen driver `-400`, and worker
-containers `+500`. Lowering scores needs `CAP_SYS_RESOURCE` (present in
-privileged DinD pods); if unavailable the monitor logs that once and only the
-worker-raising half applies. Note this doesn't help against kubelet eviction,
-which selects whole pods and ignores OOM scores.
+The monitor is observe-only. An OOM-score policy that protected the
+orchestrator (runner agent, `dockerd`, driver) by lowering their
+`oom_score_adj` was tried and removed: the runner pod is Burstable QoS, so
+kubelet pins `oom_score_adj` (873 observed) and lowering it requires
+`CAP_SYS_RESOURCE`, which the pod doesn't have — every write failed.
 
 Under DinD the workers' memory is charged to the *pod's* cgroup, so per-worker
 `--memory=4g` caps can each pass the preflight canary while the sum blows the
