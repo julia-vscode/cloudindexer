@@ -8,6 +8,13 @@ name: Regenerate symbol cache
 # R2, skips everything already cached, and only indexes genuinely new package
 # versions -- so the daily cost stays bounded once the cache is seeded.
 #
+# The sweep is split into sequential segments (jwcloudindex --shard k/n, a
+# deterministic hash partition of the version set), one matrix job each. The
+# regen script only uploads after a completed sweep, and runner pods have been
+# reaped from outside mid-run (recycling/drain, observed 5-11h in), which used
+# to lose an entire night's work -- with segments, each slice is uploaded
+# before the next starts, and a killed pod costs at most one segment.
+#
 # Runs on a self-hosted runner (label: cloudindexer). See
 # docs/self-hosted-runner.md for runner prerequisites and setup.
 
@@ -32,6 +39,10 @@ on:
         description: "Extra args forwarded to the sweep (jwcloudindex), after --"
         type: string
         default: "--newest 3"
+      shards:
+        description: "Number of sequential sweep segments; each uploads its results before the next starts"
+        type: string
+        default: "10"
 
 # Single-flight: the regen script assumes the scheduler serializes runs.
 concurrency:
@@ -42,12 +53,52 @@ permissions:
   contents: read
 
 jobs:
+  plan:
+    # Tiny setup job: expands the `shards` count into the JSON list the matrix
+    # below needs (workflow expressions can't generate ranges).
+    runs-on:
+      group: cloudindexer-self-hosted-32vcpu-64gb
+    timeout-minutes: 15
+    env:
+      SHARDS: ${{ inputs.shards || '10' }}
+    outputs:
+      list: ${{ steps.gen.outputs.list }}
+      total: ${{ steps.gen.outputs.total }}
+    steps:
+      - name: Generate shard list
+        id: gen
+        run: |
+          set -euo pipefail
+          if ! [[ "$SHARDS" =~ ^[0-9]+$ ]] || (( SHARDS < 1 || SHARDS > 64 )); then
+            echo "Invalid shards count '$SHARDS' (need an integer in 1..64)" >&2
+            exit 1
+          fi
+          echo "total=$SHARDS" >> "$GITHUB_OUTPUT"
+          echo "list=[$(seq -s, 0 $((SHARDS - 1)))]" >> "$GITHUB_OUTPUT"
+          echo "Sweeping in $SHARDS sequential segments"
+
   regen:
+    needs: plan
+    # One sweep segment per matrix job, strictly sequential. Sequencing
+    # matters twice over: the regen script assumes single-flight access to the
+    # bucket, and each segment downloads an index that already contains the
+    # previous segments' uploads. fail-fast stays off so one reaped pod only
+    # costs its own segment -- the slice is retried by the next incremental
+    # run. Every job gets a fresh runner pod, which also resets whatever
+    # lifetime clock the cluster applies to pods.
+    strategy:
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.list) }}
+      max-parallel: 1
+      fail-fast: false
     # Org-wide self-hosted runner group (32 vCPU / 64 GB).
     runs-on:
       group: cloudindexer-self-hosted-32vcpu-64gb
-    timeout-minutes: 1440
+    # Per segment; a hanging segment shouldn't stall the queue for a day.
+    timeout-minutes: 720
     env:
+      SHARD: ${{ matrix.shard }}
+      SHARD_TOTAL: ${{ needs.plan.outputs.total }}
       JW_REF: main
       R2_BUCKET: ${{ vars.R2_BUCKET || 'symbolcache' }}
       REGEN_MODE: ${{ inputs.mode || 'incremental' }}
@@ -155,7 +206,7 @@ jobs:
       - name: Run symbol-cache regen
         run: |
           set -euo pipefail
-          echo "mode=$REGEN_MODE remote=r2:$R2_BUCKET jobs=$JOBS sweep_args=$SWEEP_ARGS"
+          echo "mode=$REGEN_MODE remote=r2:$R2_BUCKET jobs=$JOBS shard=$SHARD/$SHARD_TOTAL sweep_args=$SWEEP_ARGS"
 
           # Sanity-check the concurrency budget against the pod/container
           # cgroup limit: JOBS workers at 4 GiB each, plus ~4 GiB for the
@@ -198,7 +249,7 @@ jobs:
           bash "$JW_DIR/scripts/regen_symbolcache.sh" \
             --remote "r2:$R2_BUCKET" \
             --mode "$REGEN_MODE" \
-            -- $SWEEP_ARGS --jobs "$JOBS" &
+            -- $SWEEP_ARGS --jobs "$JOBS" --shard "$SHARD/$SHARD_TOTAL" &
           child=$!
           status=0
           wait "$child" || status=$?

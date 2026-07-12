@@ -117,13 +117,37 @@ Under DinD the workers' memory is charged to the *pod's* cgroup, so per-worker
 pod limit. The regen step checks `JOBS × 4 GiB + 4 GiB` overhead against the
 visible cgroup limit and emits a workflow warning when the budget doesn't fit.
 
+## Sharded segments
+
+The regen script only uploads (artifacts, index, tombstones) after a fully
+completed sweep, and runner pods have been reaped from outside mid-run
+(recycling / node drain, observed 5–11 h in) — which used to throw away an
+entire night's progress. The workflow therefore splits each run into
+sequential segments: a `plan` job expands the `shards` input (default 10) into
+a matrix, and each matrix job sweeps one slice (`jwcloudindex --shard k/n`, a
+deterministic hash partition of the version set) and uploads its results
+before the next segment starts. A reaped pod now costs at most one segment,
+and `fail-fast: false` lets the remaining segments proceed — the failed slice
+is picked up again by the next incremental run.
+
+Segments run strictly sequentially (`max-parallel: 1`): the regen script
+assumes single-flight bucket access, and each segment downloads an index that
+already contains the previous segments' uploads. This is safe in `full` mode
+too — the script always merges new results into the downloaded index (`full`
+only additionally retries tombstoned versions), so a segment never clobbers
+other segments' entries. Each segment pays the fixed setup overhead (JW clone,
+`Pkg.instantiate`, index download/upload, ~10 min), so don't raise the shard
+count far beyond what keeps segments around an hour or two.
+
 ## Schedule and manual runs
 
 - **Scheduled:** daily at 03:00 UTC, `--mode incremental`, `JOBS=12`, sweep args
-  `--newest 3` (subject to the preflight cap above).
+  `--newest 3` (subject to the preflight cap above), 10 shards.
 - **Manual:** use **Run workflow** (`workflow_dispatch`) to override `mode`
-  (`incremental` / `full`), `jobs` (worker count), and `sweep_args` — e.g.
-  `--newest 3 --per-break` for a heavier sweep, or a wider `--include` pattern.
+  (`incremental` / `full`), `jobs` (worker count), `shards` (segment count),
+  and `sweep_args` — e.g. `--newest 3 --per-break` for a heavier sweep, or a
+  wider `--include` pattern.
 
 Runs are serialized by an Actions `concurrency` group (`regen-symbolcache`), so
-a new run never overlaps one already in progress.
+a new run never overlaps one already in progress; segments within a run are
+serialized by the matrix's `max-parallel: 1`.
