@@ -22,7 +22,7 @@ to be preinstalled. Everything else must be present:
 
 | Requirement | Notes |
 | --- | --- |
-| Ubuntu / Debian | The install step uses `apt-get`. rclone from apt must be **>= 1.59** for `provider = Cloudflare` (Ubuntu 24.04 / Debian 12 are fine; Ubuntu 22.04 / Debian 11 ship 1.53 — install a newer rclone via `curl https://rclone.org/install.sh \| sudo bash` in that case). |
+| Ubuntu / Debian | The install step uses `apt-get` for `jq`/`curl`/`unzip` and installs **rclone from rclone.org** (current stable). Distro rclone packages are too old for R2: Ubuntu 24.04's apt pins rclone 1.60.1 (2022), which predates rclone's Cloudflare-provider compatibility work — uploads fail with `501 NotImplemented`. |
 | Passwordless `sudo` | The runner user needs `sudo` for `apt-get install`, or preinstall `rclone` + `jq` and drop that step. |
 | Docker daemon | The runner user must be in the `docker` group (`sudo usermod -aG docker <user>`), or the sweep must be invokable via sudo. Workers run as `julia:1.12` containers. |
 | `git`, `curl` | For cloning the repo. Standard on Linux. |
