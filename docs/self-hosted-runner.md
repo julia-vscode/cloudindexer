@@ -82,9 +82,17 @@ and trigger OOM kills (surfacing as failed/tombstoned versions).
 
 To guard against that, the **Preflight** step launches a canary container with
 `--memory=64m` and reads back the effective limit. If it isn't enforced, the
-step emits a warning and **caps `JOBS` at 2** for that run. Check the
+step emits a warning and **caps `JOBS` at 8** for that run. Check the
 `docker info` output in that step if you want to fix the underlying delegation
 so full concurrency is available.
+
+The fallback cap used to be 2, when an unenforced `--memory` meant truly
+unbounded workers. Workers now always get `JULIA_HEAP_SIZE_HINT=3G` (forwarded
+by the launcher), which keeps each worker's GC targeting ~3 GiB regardless of
+whether docker's cap binds — so even the fallback case stays within roughly
+`JOBS × 4 GiB` of real usage, and a moderate cap suffices. The hint is a GC
+target, not a hard limit (native allocations from binary deps aren't covered),
+which is why the fallback still stays below the full default.
 
 ## Termination diagnostics
 
