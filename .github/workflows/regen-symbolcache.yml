@@ -32,7 +32,7 @@ on:
           - incremental
           - full
       jobs:
-        description: "Max concurrent sweep workers (auto-capped to 2 if container memory limits aren't enforced)"
+        description: "Max concurrent sweep workers (auto-capped to 8 if container memory limits aren't enforced)"
         type: string
         default: "12"
       sweep_args:
@@ -105,9 +105,11 @@ jobs:
       SWEEP_ARGS: ${{ inputs.sweep_args || '--newest 3' }}
       # Requested worker concurrency. Each worker container is capped at
       # --cpus=2 --memory=4g, so the 32-vCPU / 64-GB runner fits ~16; 12 leaves
-      # headroom for the host + driver. The preflight step lowers this to 2 if
+      # headroom for the host + driver. The preflight step lowers this to 8 if
       # those container memory limits aren't actually enforced (rootless / DinD
-      # without cgroup delegation), to avoid host OOM from unbounded workers.
+      # without cgroup delegation): workers still self-limit their GC via
+      # JULIA_HEAP_SIZE_HINT below, so a moderate cap suffices (it used to be 2
+      # before the heap hint existed).
       JOBS: ${{ inputs.jobs || '12' }}
       # Worker containers forward this (name-only -e in JuliaWorkspaces'
       # run_cloudindex_docker.sh), so each worker's GC targets ~3 GiB even when
@@ -194,12 +196,12 @@ jobs:
           if [[ "$limit" == "67108864" ]]; then
             echo "Container memory limits ARE enforced; keeping JOBS=$JOBS."
           else
-            echo "::warning title=Container memory limits not enforced::--memory did not bind (got '$limit'); capping concurrent workers to 2 to avoid host OOM."
-            if (( JOBS > 2 )); then
-              echo "JOBS=2" >> "$GITHUB_ENV"
-              echo "Lowered JOBS from $JOBS to 2."
+            echo "::warning title=Container memory limits not enforced::--memory did not bind (got '$limit'); capping concurrent workers to 8. Workers still self-limit their GC via JULIA_HEAP_SIZE_HINT (~3 GiB target each)."
+            if (( JOBS > 8 )); then
+              echo "JOBS=8" >> "$GITHUB_ENV"
+              echo "Lowered JOBS from $JOBS to 8."
             else
-              echo "Requested JOBS=$JOBS already <= 2; leaving as-is."
+              echo "Requested JOBS=$JOBS already <= 8; leaving as-is."
             fi
           fi
 
