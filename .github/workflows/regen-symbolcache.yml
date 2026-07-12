@@ -151,11 +151,14 @@ jobs:
       - name: Install rclone and jq
         run: |
           set -euo pipefail
-          # rclone from apt needs >= 1.59 for `provider = Cloudflare` (Ubuntu
-          # 24.04 / Debian 12 are fine; older releases ship 1.53).
+          # Don't use rclone from apt: Ubuntu LTS pins old builds (24.04 ships
+          # 1.60.1 from 2022) that predate most of rclone's Cloudflare R2
+          # compatibility work, and every upload fails with "501
+          # NotImplemented". Install the current stable release instead.
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends rclone jq
+          sudo apt-get install -y --no-install-recommends jq curl unzip
+          curl -fsSL https://rclone.org/install.sh | sudo bash
           rclone version
           jq --version
 
