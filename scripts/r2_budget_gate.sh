@@ -78,6 +78,48 @@ query_used() {
     echo "$used"
 }
 
+# done.txt = keys to skip, mirroring regen_symbolcache.sh steps 1-2.
+# incremental: successes ∪ tombstones; full: successes only (retry tombstones).
+build_done_set() {
+    local pfx="$STORE_PREFIX" state="$STORE_PREFIX/_state"
+    touch "$WORK/successes.txt"
+    if rclone copyto "${REMOTE}/${pfx}/index.tar.gz" "$WORK/index.tar.gz" 2>/dev/null; then
+        tar -xzO -f "$WORK/index.tar.gz" index.txt > "$WORK/successes.txt" || true
+    else
+        echo "[gate] no existing index.tar.gz (first run or empty remote)"
+    fi
+    touch "$WORK/tombstones.txt"
+    if rclone copyto "${REMOTE}/${state}/tombstones.txt.gz" "$WORK/tombstones.txt.gz" 2>/dev/null; then
+        gzip -dc "$WORK/tombstones.txt.gz" > "$WORK/tombstones.txt" || true
+    else
+        echo "[gate] no existing tombstones.txt.gz (first run or empty remote)"
+    fi
+    if [[ "$REGEN_MODE" == "incremental" ]]; then
+        sort -u "$WORK/successes.txt" "$WORK/tombstones.txt" > "$WORK/done.txt"
+    elif [[ "$REGEN_MODE" == "full" ]]; then
+        sort -u "$WORK/successes.txt" > "$WORK/done.txt"
+    else
+        echo "[gate] ERROR: REGEN_MODE must be 'incremental' or 'full', got '$REGEN_MODE'" >&2
+        return 1
+    fi
+}
+
+# Exact pending-version count for the whole run: dry-run worklist size over
+# the full version set (deliberately no --shard — the gate bounds the sum of
+# all segments).
+count_pending() {
+    # SWEEP_ARGS is intentionally word-split, same as the regen job's usage.
+    # shellcheck disable=SC2086
+    julia --project="$JW_DIR" \
+        -e 'using JuliaWorkspaces; exit(JuliaWorkspaces.CloudIndexApp.cli_main(ARGS))' -- \
+        --dry-run --registry "$REGISTRY" --done-set "$WORK/done.txt" \
+        --out "$WORK/worklist.jsonl" ${SWEEP_ARGS:-} >&2 || {
+        echo "[gate] ERROR: dry-run enumeration failed" >&2
+        return 1
+    }
+    wc -l < "$WORK/worklist.jsonl" | tr -d ' '
+}
+
 # main is added in a later task.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     echo "[gate] ERROR: main not implemented yet" >&2

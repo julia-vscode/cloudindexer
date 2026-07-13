@@ -101,6 +101,80 @@ t "query_used graphql errors -> failure" test_query_used_graphql_errors_fail
 t "query_used curl failure -> failure"  test_query_used_curl_failure_fails
 t "query_used malformed sum -> failure"  test_query_used_malformed_sum_fails
 
+# --- build_done_set ----------------------------------------------------------
+
+# Creates index.tar.gz (2 success keys) and tombstones.txt.gz (1 key) fixtures
+# in $TMP and points the rclone stub at them.
+make_remote_fixtures() {
+    mkdir -p "$TMP/fix"
+    printf 'uuid-a/hash1\nuuid-b/hash2\n' > "$TMP/fix/index.txt"
+    tar -czf "$TMP/fix/index.tar.gz" -C "$TMP/fix" index.txt
+    printf 'uuid-c/hash3\n' | gzip > "$TMP/fix/tombstones.txt.gz"
+    export STUB_INDEX_FILE="$TMP/fix/index.tar.gz"
+    export STUB_TOMBSTONES_FILE="$TMP/fix/tombstones.txt.gz"
+}
+
+test_done_set_incremental_unions_tombstones() {
+    make_remote_fixtures
+    source "$GATE"
+    build_done_set
+    assert_eq "$(sort "$WORK/done.txt" | tr '\n' ' ')" "uuid-a/hash1 uuid-b/hash2 uuid-c/hash3 "
+}
+
+test_done_set_full_skips_tombstones() {
+    make_remote_fixtures
+    export REGEN_MODE=full
+    source "$GATE"
+    build_done_set
+    assert_eq "$(sort "$WORK/done.txt" | tr '\n' ' ')" "uuid-a/hash1 uuid-b/hash2 "
+}
+
+test_done_set_tolerates_absent_remote_files() {
+    # No STUB_INDEX_FILE / STUB_TOMBSTONES_FILE -> rclone stub exits 1.
+    source "$GATE"
+    build_done_set
+    assert_eq "$(wc -l < "$WORK/done.txt" | tr -d ' ')" "0"
+}
+
+test_done_set_rejects_unknown_mode() {
+    export REGEN_MODE=bogus
+    source "$GATE"
+    ! build_done_set
+}
+
+t "done set: incremental unions tombstones" test_done_set_incremental_unions_tombstones
+t "done set: full skips tombstones"         test_done_set_full_skips_tombstones
+t "done set: tolerates absent remote files" test_done_set_tolerates_absent_remote_files
+t "done set: rejects unknown mode"          test_done_set_rejects_unknown_mode
+
+# --- count_pending -----------------------------------------------------------
+
+test_count_pending_counts_worklist_lines() {
+    export STUB_PENDING=7
+    source "$GATE"
+    touch "$WORK/done.txt"
+    assert_eq "$(count_pending)" "7"
+}
+
+test_count_pending_forwards_sweep_args_and_done_set() {
+    export STUB_PENDING=1
+    export STUB_JULIA_ARGS_FILE="$TMP/julia_args"
+    export SWEEP_ARGS="--newest 3"
+    source "$GATE"
+    touch "$WORK/done.txt"
+    count_pending >/dev/null
+    grep -qx -- "--dry-run" "$STUB_JULIA_ARGS_FILE"
+    grep -qx -- "--newest" "$STUB_JULIA_ARGS_FILE"
+    grep -qx -- "3" "$STUB_JULIA_ARGS_FILE"
+    grep -qx -- "$WORK/done.txt" "$STUB_JULIA_ARGS_FILE"
+    grep -qx -- "$REGISTRY" "$STUB_JULIA_ARGS_FILE"
+    # The whole-run count must not be shard-limited.
+    ! grep -qx -- "--shard" "$STUB_JULIA_ARGS_FILE"
+}
+
+t "count_pending: counts worklist lines"       test_count_pending_counts_worklist_lines
+t "count_pending: forwards args, no --shard"   test_count_pending_forwards_sweep_args_and_done_set
+
 echo
 echo "$PASS passed, $FAIL failed"
 [[ "$FAIL" == 0 ]]
