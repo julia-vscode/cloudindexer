@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1090,SC2030,SC2031
+# SC1090: tests source the gate via $GATE. SC2030/SC2031: each test runs in a
+# subshell on purpose — env mutations are meant to be isolated per test.
 # Unit tests for scripts/r2_budget_gate.sh. External binaries (curl, rclone,
 # julia) are stubbed via tests/stubs on PATH; jq is used for real.
 # Run: bash tests/test_r2_budget_gate.sh
