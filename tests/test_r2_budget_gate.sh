@@ -182,6 +182,87 @@ test_count_pending_forwards_sweep_args_and_done_set() {
 t "count_pending: counts worklist lines"       test_count_pending_counts_worklist_lines
 t "count_pending: forwards args, no --shard"   test_count_pending_forwards_sweep_args_and_done_set
 
+# --- decide_and_report / main ------------------------------------------------
+
+test_decide_proceed_under_budget() {
+    source "$GATE"
+    decide_and_report 500000 100
+    assert_eq "$(output_val proceed)" "true"
+    # planned = 2*100 + 2*10 + 10000 = 10220
+    assert_eq "$(output_val planned)" "10220"
+    assert_eq "$(output_val used)" "500000"
+    assert_eq "$(output_val pending)" "100"
+    assert_eq "$(output_val budget)" "1000000"
+}
+
+test_decide_skip_over_budget() {
+    source "$GATE"
+    decide_and_report 990000 100
+    assert_eq "$(output_val proceed)" "false"
+}
+
+test_decide_exactly_at_budget_proceeds() {
+    # planned = 2*100 + 2*10 + 10000 = 10220; used + planned == budget.
+    export R2_CLASSA_BUDGET=20220
+    source "$GATE"
+    decide_and_report 10000 100
+    assert_eq "$(output_val proceed)" "true"
+}
+
+test_decide_honors_margin_var() {
+    export R2_CLASSA_MARGIN=0
+    source "$GATE"
+    decide_and_report 0 0
+    # planned = 0 + 2*10 + 0 = 20
+    assert_eq "$(output_val planned)" "20"
+}
+
+test_decide_writes_step_summary() {
+    source "$GATE"
+    decide_and_report 1 2
+    grep -q "R2 Class A budget gate" "$GITHUB_STEP_SUMMARY"
+}
+
+t "decide: proceeds under budget"      test_decide_proceed_under_budget
+t "decide: skips over budget"          test_decide_skip_over_budget
+t "decide: exact budget proceeds (<=)" test_decide_exactly_at_budget_proceeds
+t "decide: honors R2_CLASSA_MARGIN"    test_decide_honors_margin_var
+t "decide: writes step summary"        test_decide_writes_step_summary
+
+test_main_end_to_end_proceed() {
+    make_remote_fixtures
+    export STUB_PENDING=5
+    bash "$GATE"
+    assert_eq "$(output_val proceed)" "true"
+    # planned = 2*5 + 2*10 + 10000 = 10030
+    assert_eq "$(output_val planned)" "10030"
+    assert_eq "$(output_val used)" "123456"
+}
+
+test_main_end_to_end_skip_exits_zero() {
+    make_remote_fixtures
+    export STUB_PENDING=5
+    export R2_CLASSA_BUDGET=100000   # used=123456 > budget -> skip, exit 0
+    bash "$GATE"
+    assert_eq "$(output_val proceed)" "false"
+}
+
+test_main_fail_closed_on_analytics_failure() {
+    make_remote_fixtures
+    export STUB_CURL_EXIT=22
+    ! bash "$GATE"
+}
+
+test_main_rejects_missing_env() {
+    unset R2_ACCOUNT_ID
+    ! bash "$GATE"
+}
+
+t "main: e2e proceed"                    test_main_end_to_end_proceed
+t "main: e2e over-budget skip, exit 0"   test_main_end_to_end_skip_exits_zero
+t "main: fail-closed on analytics error" test_main_fail_closed_on_analytics_failure
+t "main: rejects missing env"            test_main_rejects_missing_env
+
 echo
 echo "$PASS passed, $FAIL failed"
 [[ "$FAIL" == 0 ]]

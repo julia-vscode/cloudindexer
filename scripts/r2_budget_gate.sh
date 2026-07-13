@@ -132,8 +132,66 @@ count_pending() {
     wc -l < "$WORK/worklist.jsonl" | tr -d ' '
 }
 
-# main is added in a later task.
+# Compute the decision and report it to the log, $GITHUB_OUTPUT and
+# $GITHUB_STEP_SUMMARY (each only when set).
+decide_and_report() {
+    local used=$1 pending=$2
+    local budget margin planned proceed
+    budget="${R2_CLASSA_BUDGET:-1000000}"
+    margin="${R2_CLASSA_MARGIN:-10000}"
+    planned=$((2 * pending + 2 * SHARDS + margin))
+    if (( used + planned <= budget )); then
+        proceed=true
+    else
+        proceed=false
+    fi
+
+    echo "[gate] used=$used planned=$planned (pending=$pending shards=$SHARDS margin=$margin) budget=$budget proceed=$proceed"
+    if [[ "$proceed" == false ]]; then
+        echo "::warning title=R2 Class A budget gate::Skipping regen: month-to-date Class A ops ($used) + planned upper bound ($planned) exceed budget ($budget)."
+    fi
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        {
+            echo "proceed=$proceed"
+            echo "used=$used"
+            echo "planned=$planned"
+            echo "pending=$pending"
+            echo "budget=$budget"
+        } >> "$GITHUB_OUTPUT"
+    fi
+    if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+        {
+            echo "### R2 Class A budget gate"
+            echo ""
+            echo "| used (month-to-date) | planned (upper bound) | budget | pending versions | proceed |"
+            echo "| ---: | ---: | ---: | ---: | :--- |"
+            echo "| $used | $planned | $budget | $pending | $proceed |"
+        } >> "$GITHUB_STEP_SUMMARY"
+    fi
+}
+
+main() {
+    : "${CLOUDFLARE_ANALYTICS_TOKEN:?}" "${R2_ACCOUNT_ID:?}" "${REMOTE:?}" \
+      "${REGEN_MODE:?}" "${SHARDS:?}" "${JW_DIR:?}" "${REGISTRY:?}"
+    [[ "$SHARDS" =~ ^[0-9]+$ ]] || {
+        echo "[gate] ERROR: SHARDS must be an integer, got '$SHARDS'" >&2
+        exit 2
+    }
+    WORK="${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/r2_budget_gate.XXXXXX")}"
+    mkdir -p "$WORK"
+    # shellcheck disable=SC1091
+    source "$JW_DIR/scripts/symbolcache_common.sh"   # provides STORE_PREFIX
+
+    local used pending
+    used="$(query_used)"
+    echo "[gate] month-to-date Class A ops (account-wide): $used"
+    build_done_set
+    echo "[gate] done.txt has $(wc -l < "$WORK/done.txt") entries (mode=$REGEN_MODE)"
+    pending="$(count_pending)"
+    echo "[gate] pending versions this run: $pending"
+    decide_and_report "$used" "$pending"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    echo "[gate] ERROR: main not implemented yet" >&2
-    exit 3
+    main "$@"
 fi
