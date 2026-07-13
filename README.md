@@ -21,6 +21,8 @@ Configuration:
 - Repo variable `R2_CLASSA_BUDGET` (optional, default `1000000`): total
   monthly budget; set lower for standing headroom.
 - Repo variable `R2_CLASSA_MARGIN` (optional, default `10000`): fixed slack
-  for list pagination, retries, and analytics sampling error.
+  for list pagination, retries, and analytics sampling error. The margin is
+  load-bearing — the 2·P + 2·S terms undercount listing pagination and
+  multipart overhead — so don't set it below ~1000 in production.
 
 Tests: `bash tests/test_r2_budget_gate.sh` (stubs curl/rclone/julia; needs jq).

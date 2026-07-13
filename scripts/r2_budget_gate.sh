@@ -9,10 +9,14 @@
 #
 #   planned = 2*P + 2*SHARDS + margin
 #     P       pending versions (jwcloudindex --dry-run): 1 PutObject per
-#             artifact + at most 1 ListObjects while `rclone copy` lists the
-#             destination directory it copies into
-#     2*S     per-shard index.tar.gz + tombstones.txt.gz uploads
-#     margin  list pagination / rclone retries / analytics sampling slack
+#             artifact + roughly 1 ListObjects of destination listing during
+#             `rclone copy` (bounded per-artifact for the uuid dirs it walks)
+#     2*S     per-shard index.tar.gz + tombstones.txt.gz uploads (tombstones
+#             go via `rclone rcat`, which may use multipart: ~3 Class A ops)
+#     margin  absorbs what the terms above undercount: destination-prefix
+#             ListObjects pagination (grows with registry size), rcat
+#             multipart overhead, rclone retries, and analytics sampling
+#             error. Do not set it near zero in production.
 #
 # Proceed iff used + planned <= budget. Fail-closed: any operational failure
 # (analytics API, rclone, dry run) exits nonzero; an over-budget skip is a
@@ -54,7 +58,7 @@ query_used() {
         --argjson actions "$CLASS_A_ACTIONS" \
         '{query: "query($account: string!, $start: Time!, $now: Time!, $actions: [string!]) { viewer { accounts(filter: {accountTag: $account}) { r2OperationsAdaptiveGroups(limit: 10000, filter: {datetime_geq: $start, datetime_leq: $now, actionType_in: $actions}) { sum { requests } } } } }",
           variables: {account: $account, start: $start, now: $now, actions: $actions}}')"
-    response="$(curl -fsS --max-time 60 https://api.cloudflare.com/client/v4/graphql \
+    response="$(curl -fsS --retry 3 --max-time 60 https://api.cloudflare.com/client/v4/graphql \
         -H "Authorization: Bearer $CLOUDFLARE_ANALYTICS_TOKEN" \
         -H "Content-Type: application/json" \
         --data "$payload")" || {
@@ -84,7 +88,7 @@ build_done_set() {
     local pfx="$STORE_PREFIX" state="$STORE_PREFIX/_state" rc
     touch "$WORK/successes.txt"
     rc=0
-    rclone copyto "${REMOTE}/${pfx}/index.tar.gz" "$WORK/index.tar.gz" 2>/dev/null || rc=$?
+    rclone copyto "${REMOTE}/${pfx}/index.tar.gz" "$WORK/index.tar.gz" 2>"$WORK/rclone_index.err" || rc=$?
     if (( rc == 0 )); then
         tar -xzO -f "$WORK/index.tar.gz" index.txt > "$WORK/successes.txt" || true
     elif (( rc == 3 || rc == 4 )); then
@@ -92,11 +96,12 @@ build_done_set() {
         echo "[gate] no existing index.tar.gz (first run or empty remote)"
     else
         echo "[gate] ERROR: rclone copyto index.tar.gz failed with exit $rc" >&2
+        cat "$WORK/rclone_index.err" >&2
         return 1
     fi
     touch "$WORK/tombstones.txt"
     rc=0
-    rclone copyto "${REMOTE}/${state}/tombstones.txt.gz" "$WORK/tombstones.txt.gz" 2>/dev/null || rc=$?
+    rclone copyto "${REMOTE}/${state}/tombstones.txt.gz" "$WORK/tombstones.txt.gz" 2>"$WORK/rclone_tombstones.err" || rc=$?
     if (( rc == 0 )); then
         gzip -dc "$WORK/tombstones.txt.gz" > "$WORK/tombstones.txt" || true
     elif (( rc == 3 || rc == 4 )); then
@@ -104,6 +109,7 @@ build_done_set() {
         echo "[gate] no existing tombstones.txt.gz (first run or empty remote)"
     else
         echo "[gate] ERROR: rclone copyto tombstones.txt.gz failed with exit $rc" >&2
+        cat "$WORK/rclone_tombstones.err" >&2
         return 1
     fi
     if [[ "$REGEN_MODE" == "incremental" ]]; then
@@ -177,6 +183,10 @@ main() {
         echo "[gate] ERROR: SHARDS must be an integer, got '$SHARDS'" >&2
         exit 2
     }
+    if [[ " ${SWEEP_ARGS:-} " =~ [[:space:]]--shard([[:space:]]|$) ]]; then
+        echo "[gate] ERROR: --shard is not allowed in SWEEP_ARGS: the gate counts the whole run (the regen matrix appends its own --shard, overriding yours, so the count would no longer be an upper bound)" >&2
+        exit 2
+    fi
     WORK="${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/r2_budget_gate.XXXXXX")}"
     mkdir -p "$WORK"
     # shellcheck disable=SC1091

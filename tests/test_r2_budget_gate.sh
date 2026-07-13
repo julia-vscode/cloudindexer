@@ -133,7 +133,7 @@ test_done_set_full_skips_tombstones() {
 }
 
 test_done_set_tolerates_absent_remote_files() {
-    # No STUB_INDEX_FILE / STUB_TOMBSTONES_FILE -> rclone stub exits 1.
+    # No STUB_INDEX_FILE / STUB_TOMBSTONES_FILE -> rclone stub exits 4.
     source "$GATE"
     build_done_set
     assert_eq "$(wc -l < "$WORK/done.txt" | tr -d ' ')" "0"
@@ -265,6 +265,14 @@ t "main: e2e proceed"                    test_main_end_to_end_proceed
 t "main: e2e over-budget skip, exit 0"   test_main_end_to_end_skip_exits_zero
 t "main: fail-closed on analytics error" test_main_fail_closed_on_analytics_failure
 t "main: rejects missing env"            test_main_rejects_missing_env
+
+test_main_rejects_shard_in_sweep_args() {
+    make_remote_fixtures
+    export SWEEP_ARGS="--newest 3 --shard 0/10"
+    ! bash "$GATE"
+}
+
+t "main: rejects --shard in SWEEP_ARGS"  test_main_rejects_shard_in_sweep_args
 
 echo
 echo "$PASS passed, $FAIL failed"
