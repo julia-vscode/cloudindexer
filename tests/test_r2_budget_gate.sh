@@ -142,10 +142,17 @@ test_done_set_rejects_unknown_mode() {
     ! build_done_set
 }
 
+test_done_set_fails_on_rclone_transport_error() {
+    export STUB_RCLONE_EXIT=1   # not a not-found code -> hard failure
+    source "$GATE"
+    ! build_done_set
+}
+
 t "done set: incremental unions tombstones" test_done_set_incremental_unions_tombstones
 t "done set: full skips tombstones"         test_done_set_full_skips_tombstones
 t "done set: tolerates absent remote files" test_done_set_tolerates_absent_remote_files
 t "done set: rejects unknown mode"          test_done_set_rejects_unknown_mode
+t "done set: rclone transport error -> failure" test_done_set_fails_on_rclone_transport_error
 
 # --- count_pending -----------------------------------------------------------
 

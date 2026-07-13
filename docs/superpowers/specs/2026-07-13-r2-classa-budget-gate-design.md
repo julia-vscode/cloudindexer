@@ -82,8 +82,8 @@ Steps:
    `errors` is empty/null and the sum parses as a non-negative integer.
    Anything else → nonzero exit (fail-closed).
 2. **Build done.txt:** download `index.tar.gz` and `tombstones.txt.gz` from
-   the bucket with `rclone copyto` (Class B; tolerate absence, same as
-   `regen_symbolcache.sh`). `incremental` → successes ∪ tombstones;
+   the bucket with `rclone copyto` (Class B; rclone exit 3/4 = absent,
+   tolerated as first run; any other failure is fatal). `incremental` → successes ∪ tombstones;
    `full` → successes only.
 3. **Count P:** run `jwcloudindex --dry-run --registry $REGISTRY
    --done-set done.txt $SWEEP_ARGS --out worklist.jsonl`; `P` = line count of

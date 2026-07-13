@@ -81,18 +81,30 @@ query_used() {
 # done.txt = keys to skip, mirroring regen_symbolcache.sh steps 1-2.
 # incremental: successes ∪ tombstones; full: successes only (retry tombstones).
 build_done_set() {
-    local pfx="$STORE_PREFIX" state="$STORE_PREFIX/_state"
+    local pfx="$STORE_PREFIX" state="$STORE_PREFIX/_state" rc
     touch "$WORK/successes.txt"
-    if rclone copyto "${REMOTE}/${pfx}/index.tar.gz" "$WORK/index.tar.gz" 2>/dev/null; then
+    rc=0
+    rclone copyto "${REMOTE}/${pfx}/index.tar.gz" "$WORK/index.tar.gz" 2>/dev/null || rc=$?
+    if (( rc == 0 )); then
         tar -xzO -f "$WORK/index.tar.gz" index.txt > "$WORK/successes.txt" || true
-    else
+    elif (( rc == 3 || rc == 4 )); then
+        # rclone: 3 = directory not found, 4 = file not found -> first run
         echo "[gate] no existing index.tar.gz (first run or empty remote)"
+    else
+        echo "[gate] ERROR: rclone copyto index.tar.gz failed with exit $rc" >&2
+        return 1
     fi
     touch "$WORK/tombstones.txt"
-    if rclone copyto "${REMOTE}/${state}/tombstones.txt.gz" "$WORK/tombstones.txt.gz" 2>/dev/null; then
+    rc=0
+    rclone copyto "${REMOTE}/${state}/tombstones.txt.gz" "$WORK/tombstones.txt.gz" 2>/dev/null || rc=$?
+    if (( rc == 0 )); then
         gzip -dc "$WORK/tombstones.txt.gz" > "$WORK/tombstones.txt" || true
-    else
+    elif (( rc == 3 || rc == 4 )); then
+        # rclone: 3 = directory not found, 4 = file not found -> first run
         echo "[gate] no existing tombstones.txt.gz (first run or empty remote)"
+    else
+        echo "[gate] ERROR: rclone copyto tombstones.txt.gz failed with exit $rc" >&2
+        return 1
     fi
     if [[ "$REGEN_MODE" == "incremental" ]]; then
         sort -u "$WORK/successes.txt" "$WORK/tombstones.txt" > "$WORK/done.txt"
