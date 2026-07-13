@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# julia stub for the gate's dry run: records argv to STUB_JULIA_ARGS_FILE
+# (one arg per line), writes STUB_PENDING JSONL lines to the --out file.
+set -u
+printf '%s\n' "$@" > "${STUB_JULIA_ARGS_FILE:-/dev/null}"
+out=""
+prev=""
+for a in "$@"; do
+    [[ "$prev" == "--out" ]] && out=$a
+    prev=$a
+done
+[[ -n "$out" ]] || { echo "julia stub: no --out in argv" >&2; exit 9; }
+n="${STUB_PENDING:-0}"
+: > "$out"
+for ((i = 0; i < n; i++)); do
+    echo "{\"name\":\"Pkg$i\",\"status\":\"pending\"}" >> "$out"
+done

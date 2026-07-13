@@ -54,6 +54,7 @@ Set these repository secrets (**Settings → Secrets and variables → Actions**
 | `R2_ACCESS_KEY_ID` | R2 access key ID. |
 | `R2_SECRET_ACCESS_KEY` | R2 secret access key. |
 | `R2_ACCOUNT_ID` | Cloudflare account ID; used to build the S3 endpoint `https://<account>.r2.cloudflarestorage.com`. |
+| `CLOUDFLARE_ANALYTICS_TOKEN` | Cloudflare API token with Account Analytics: Read; used by the budget gate in the plan job. |
 
 The workflow does not write an rclone config file. The regen scripts assume the
 `r2:` remote already exists, so the workflow defines it through
@@ -66,6 +67,8 @@ Optional repository **variable**:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `R2_BUCKET` | `symbolcache` | R2 bucket name; the rclone remote passed to the script is `r2:<R2_BUCKET>`. |
+| `R2_CLASSA_BUDGET` | `1000000` | Monthly Class A op budget for the budget gate. |
+| `R2_CLASSA_MARGIN` | `10000` | Fixed slack added to the gate's planned-ops bound. |
 
 ## Concurrency and container resource limits
 

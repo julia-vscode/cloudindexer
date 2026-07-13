@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+#
+# R2 Class A budget gate for the symbol-cache regen workflow.
+#
+# Decides whether a regen run fits in the R2 free tier's monthly Class A
+# operation budget: queries month-to-date usage (account-wide, UTC calendar
+# month) from Cloudflare's GraphQL Analytics API, computes an upper bound on
+# the operations the run would consume, and reports proceed/skip.
+#
+#   planned = 2*P + 2*SHARDS + margin
+#     P       pending versions (jwcloudindex --dry-run): 1 PutObject per
+#             artifact + roughly 1 ListObjects of destination listing during
+#             `rclone copy` (bounded per-artifact for the uuid dirs it walks)
+#     2*S     per-shard index.tar.gz + tombstones.txt.gz uploads (tombstones
+#             go via `rclone rcat`, which may use multipart: ~3 Class A ops)
+#     margin  absorbs what the terms above undercount: destination-prefix
+#             ListObjects pagination (grows with registry size), rcat
+#             multipart overhead, rclone retries, and analytics sampling
+#             error. Do not set it near zero in production.
+#
+# Proceed iff used + planned <= budget. Fail-closed: any operational failure
+# (analytics API, rclone, dry run) exits nonzero; an over-budget skip is a
+# successful run with proceed=false.
+#
+# Required env:
+#   CLOUDFLARE_ANALYTICS_TOKEN  API token with Account Analytics:Read
+#   R2_ACCOUNT_ID               Cloudflare account tag
+#   REMOTE                      rclone remote + bucket, e.g. r2:symbolcache
+#   REGEN_MODE                  incremental | full
+#   SHARDS                      sweep segment count
+#   JW_DIR                      JuliaWorkspaces.jl checkout (instantiated)
+#   REGISTRY                    unpacked General registry path
+# Optional env:
+#   SWEEP_ARGS                  filters forwarded to the dry run (default: "")
+#   R2_CLASSA_BUDGET            default 1000000
+#   R2_CLASSA_MARGIN            default 10000
+#   WORK                        scratch dir (default: fresh mktemp)
+#
+# Writes proceed/used/planned/pending/budget to $GITHUB_OUTPUT and a summary
+# table to $GITHUB_STEP_SUMMARY when those are set.
+set -euo pipefail
+
+# Class A operations per
+# https://developers.cloudflare.com/r2/pricing/#class-a-operations
+CLASS_A_ACTIONS='["ListBuckets","PutBucket","ListObjects","PutObject","CopyObject","CompleteMultipartUpload","CreateMultipartUpload","LifecycleStorageTierTransition","ListMultipartUploads","UploadPart","UploadPartCopy","ListParts","PutBucketEncryption","PutBucketCors","PutBucketLifecycleConfiguration"]'
+
+# Month-to-date Class A operations, account-wide, UTC calendar month.
+# Echoes a non-negative integer. Zero rows is a valid zero; a transport
+# error, GraphQL error, unmatched account, or malformed sum is a failure.
+query_used() {
+    local start now payload response used
+    start="$(date -u +%Y-%m-01T00:00:00Z)"
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    payload="$(jq -n \
+        --arg account "$R2_ACCOUNT_ID" \
+        --arg start "$start" \
+        --arg now "$now" \
+        --argjson actions "$CLASS_A_ACTIONS" \
+        '{query: "query($account: string!, $start: Time!, $now: Time!, $actions: [string!]) { viewer { accounts(filter: {accountTag: $account}) { r2OperationsAdaptiveGroups(limit: 10000, filter: {datetime_geq: $start, datetime_leq: $now, actionType_in: $actions}) { sum { requests } } } } }",
+          variables: {account: $account, start: $start, now: $now, actions: $actions}}')"
+    response="$(curl -fsS --retry 3 --max-time 60 https://api.cloudflare.com/client/v4/graphql \
+        -H "Authorization: Bearer $CLOUDFLARE_ANALYTICS_TOKEN" \
+        -H "Content-Type: application/json" \
+        --data "$payload")" || {
+        echo "[gate] ERROR: analytics API request failed" >&2
+        return 1
+    }
+    used="$(jq -er '
+        if (.errors // []) != [] then error("graphql errors") else . end
+        | .data.viewer.accounts
+        | if length == 0 then error("no account matched accountTag") else . end
+        | [.[0].r2OperationsAdaptiveGroups[].sum.requests] as $reqs
+        | if ($reqs | all(type == "number")) then ($reqs | add // 0 | round) else error("malformed group: non-numeric sum.requests") end
+    ' <<<"$response")" || {
+        echo "[gate] ERROR: unexpected analytics response: $response" >&2
+        return 1
+    }
+    [[ "$used" =~ ^[0-9]+$ ]] || {
+        echo "[gate] ERROR: non-integer usage value: $used" >&2
+        return 1
+    }
+    echo "$used"
+}
+
+# done.txt = keys to skip, mirroring regen_symbolcache.sh steps 1-2.
+# incremental: successes ∪ tombstones; full: successes only (retry tombstones).
+build_done_set() {
+    local pfx="$STORE_PREFIX" state="$STORE_PREFIX/_state" rc
+    touch "$WORK/successes.txt"
+    rc=0
+    rclone copyto "${REMOTE}/${pfx}/index.tar.gz" "$WORK/index.tar.gz" 2>"$WORK/rclone_index.err" || rc=$?
+    if (( rc == 0 )); then
+        tar -xzO -f "$WORK/index.tar.gz" index.txt > "$WORK/successes.txt" || true
+    elif (( rc == 3 || rc == 4 )); then
+        # rclone: 3 = directory not found, 4 = file not found -> first run
+        echo "[gate] no existing index.tar.gz (first run or empty remote)"
+    else
+        echo "[gate] ERROR: rclone copyto index.tar.gz failed with exit $rc" >&2
+        cat "$WORK/rclone_index.err" >&2
+        return 1
+    fi
+    touch "$WORK/tombstones.txt"
+    rc=0
+    rclone copyto "${REMOTE}/${state}/tombstones.txt.gz" "$WORK/tombstones.txt.gz" 2>"$WORK/rclone_tombstones.err" || rc=$?
+    if (( rc == 0 )); then
+        gzip -dc "$WORK/tombstones.txt.gz" > "$WORK/tombstones.txt" || true
+    elif (( rc == 3 || rc == 4 )); then
+        # rclone: 3 = directory not found, 4 = file not found -> first run
+        echo "[gate] no existing tombstones.txt.gz (first run or empty remote)"
+    else
+        echo "[gate] ERROR: rclone copyto tombstones.txt.gz failed with exit $rc" >&2
+        cat "$WORK/rclone_tombstones.err" >&2
+        return 1
+    fi
+    if [[ "$REGEN_MODE" == "incremental" ]]; then
+        sort -u "$WORK/successes.txt" "$WORK/tombstones.txt" > "$WORK/done.txt"
+    elif [[ "$REGEN_MODE" == "full" ]]; then
+        sort -u "$WORK/successes.txt" > "$WORK/done.txt"
+    else
+        echo "[gate] ERROR: REGEN_MODE must be 'incremental' or 'full', got '$REGEN_MODE'" >&2
+        return 1
+    fi
+}
+
+# Exact pending-version count for the whole run: dry-run worklist size over
+# the full version set (deliberately no --shard — the gate bounds the sum of
+# all segments).
+count_pending() {
+    # SWEEP_ARGS is intentionally word-split, same as the regen job's usage.
+    # shellcheck disable=SC2086
+    julia --project="$JW_DIR" \
+        -e 'using JuliaWorkspaces; exit(JuliaWorkspaces.CloudIndexApp.cli_main(ARGS))' -- \
+        --dry-run --registry "$REGISTRY" --done-set "$WORK/done.txt" \
+        --out "$WORK/worklist.jsonl" ${SWEEP_ARGS:-} >&2 || {
+        echo "[gate] ERROR: dry-run enumeration failed" >&2
+        return 1
+    }
+    wc -l < "$WORK/worklist.jsonl" | tr -d ' '
+}
+
+# Compute the decision and report it to the log, $GITHUB_OUTPUT and
+# $GITHUB_STEP_SUMMARY (each only when set).
+decide_and_report() {
+    local used=$1 pending=$2
+    local budget margin planned proceed
+    budget="${R2_CLASSA_BUDGET:-1000000}"
+    margin="${R2_CLASSA_MARGIN:-10000}"
+    planned=$((2 * pending + 2 * SHARDS + margin))
+    if (( used + planned <= budget )); then
+        proceed=true
+    else
+        proceed=false
+    fi
+
+    echo "[gate] used=$used planned=$planned (pending=$pending shards=$SHARDS margin=$margin) budget=$budget proceed=$proceed"
+    if [[ "$proceed" == false ]]; then
+        echo "::warning title=R2 Class A budget gate::Skipping regen: month-to-date Class A ops ($used) + planned upper bound ($planned) exceed budget ($budget)."
+    fi
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        {
+            echo "proceed=$proceed"
+            echo "used=$used"
+            echo "planned=$planned"
+            echo "pending=$pending"
+            echo "budget=$budget"
+        } >> "$GITHUB_OUTPUT"
+    fi
+    if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+        {
+            echo "### R2 Class A budget gate"
+            echo ""
+            echo "| used (month-to-date) | planned (upper bound) | budget | pending versions | proceed |"
+            echo "| ---: | ---: | ---: | ---: | :--- |"
+            echo "| $used | $planned | $budget | $pending | $proceed |"
+        } >> "$GITHUB_STEP_SUMMARY"
+    fi
+}
+
+main() {
+    : "${CLOUDFLARE_ANALYTICS_TOKEN:?}" "${R2_ACCOUNT_ID:?}" "${REMOTE:?}" \
+      "${REGEN_MODE:?}" "${SHARDS:?}" "${JW_DIR:?}" "${REGISTRY:?}"
+    [[ "$SHARDS" =~ ^[0-9]+$ ]] || {
+        echo "[gate] ERROR: SHARDS must be an integer, got '$SHARDS'" >&2
+        exit 2
+    }
+    if [[ " ${SWEEP_ARGS:-} " =~ [[:space:]]--shard([[:space:]]|$) ]]; then
+        echo "[gate] ERROR: --shard is not allowed in SWEEP_ARGS: the gate counts the whole run (the regen matrix appends its own --shard, overriding yours, so the count would no longer be an upper bound)" >&2
+        exit 2
+    fi
+    WORK="${WORK:-$(mktemp -d "${TMPDIR:-/tmp}/r2_budget_gate.XXXXXX")}"
+    mkdir -p "$WORK"
+    # shellcheck disable=SC1091
+    source "$JW_DIR/scripts/symbolcache_common.sh"   # provides STORE_PREFIX
+
+    local used pending
+    used="$(query_used)"
+    echo "[gate] month-to-date Class A ops (account-wide): $used"
+    build_done_set
+    echo "[gate] done.txt has $(wc -l < "$WORK/done.txt") entries (mode=$REGEN_MODE)"
+    pending="$(count_pending)"
+    echo "[gate] pending versions this run: $pending"
+    decide_and_report "$used" "$pending"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

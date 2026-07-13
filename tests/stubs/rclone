@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# rclone stub: only supports `copyto SRC DEST`. STUB_INDEX_FILE /
+# STUB_TOMBSTONES_FILE supply payloads; unset -> exit 4 (object absent).
+set -u
+if [[ "${STUB_RCLONE_EXIT:-0}" != 0 ]]; then
+    exit "$STUB_RCLONE_EXIT"
+fi
+[[ "$1" == "copyto" ]] || { echo "rclone stub: unsupported: $*" >&2; exit 9; }
+src=$2 dest=$3
+case "$src" in
+    */index.tar.gz)
+        [[ -n "${STUB_INDEX_FILE:-}" ]] || exit 4
+        cp "$STUB_INDEX_FILE" "$dest" ;;
+    */tombstones.txt.gz)
+        [[ -n "${STUB_TOMBSTONES_FILE:-}" ]] || exit 4
+        cp "$STUB_TOMBSTONES_FILE" "$dest" ;;
+    *) exit 4 ;;
+esac
