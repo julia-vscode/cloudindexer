@@ -65,7 +65,8 @@ query_used() {
         if (.errors // []) != [] then error("graphql errors") else . end
         | .data.viewer.accounts
         | if length == 0 then error("no account matched accountTag") else . end
-        | [.[0].r2OperationsAdaptiveGroups[].sum.requests] | add // 0 | round
+        | [.[0].r2OperationsAdaptiveGroups[].sum.requests] as $reqs
+        | if ($reqs | all(type == "number")) then ($reqs | add // 0 | round) else error("malformed group: non-numeric sum.requests") end
     ' <<<"$response")" || {
         echo "[gate] ERROR: unexpected analytics response: $response" >&2
         return 1

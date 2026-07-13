@@ -88,11 +88,18 @@ test_query_used_curl_failure_fails() {
     ! query_used
 }
 
+test_query_used_malformed_sum_fails() {
+    export STUB_CURL_RESPONSE="$FIXTURES/graphql_malformed.json"
+    source "$GATE"
+    ! query_used
+}
+
 t "query_used sums requests"            test_query_used_ok
 t "query_used empty groups -> 0"        test_query_used_empty_groups_is_zero
 t "query_used no account -> failure"    test_query_used_no_account_fails
 t "query_used graphql errors -> failure" test_query_used_graphql_errors_fail
 t "query_used curl failure -> failure"  test_query_used_curl_failure_fails
+t "query_used malformed sum -> failure"  test_query_used_malformed_sum_fails
 
 echo
 echo "$PASS passed, $FAIL failed"
