@@ -94,37 +94,6 @@ whether docker's cap binds — so even the fallback case stays within roughly
 target, not a hard limit (native allocations from binary deps aren't covered),
 which is why the fallback still stays below the full default.
 
-## Termination diagnostics
-
-Runs have died with GitHub's "runner lost communication" annotation — the
-runner pod (on Kubernetes) was terminated from outside. There are three
-distinct mechanisms, each with a different fingerprint in the regen step's
-live log (GitHub retains streamed lines even when the pod dies mid-step):
-
-| Mechanism | Signal | Fingerprint in the log |
-| --- | --- | --- |
-| kubelet node-pressure eviction | SIGTERM, then SIGKILL | "received SIGTERM" from the regen step's trap, with `node_avail` collapsing in the preceding `[memdiag]` snapshots |
-| node drain / scale-down / pod deletion | SIGTERM, then SIGKILL | "received SIGTERM" but `node_avail` healthy — memory wasn't the trigger |
-| kernel OOM kill (node- or pod-cgroup-level) | SIGKILL only | log stops abruptly, no trap message; `cg_oom_kills` incrementing means pod-cgroup kills, `node_avail` near zero means node-level; dmesg lines (if readable) show `CONSTRAINT_MEMCG` vs `CONSTRAINT_NONE` |
-
-`scripts/memdiag.sh` runs in the background *inside* the regen step, sharing
-its stdout, and prints a compact snapshot every 60 s (node `MemAvailable`,
-pod-cgroup usage/limit, cgroup `oom_kill` counter, worker count, memory PSI)
-plus a detail block every 10 min (top-RSS processes with OOM scores, per-worker
-`docker stats`). A `Collect memory diagnostics` step dumps `memory.events` and
-kernel OOM lines whenever the runner survives to the end.
-
-The monitor is observe-only. An OOM-score policy that protected the
-orchestrator (runner agent, `dockerd`, driver) by lowering their
-`oom_score_adj` was tried and removed: the runner pod is Burstable QoS, so
-kubelet pins `oom_score_adj` (873 observed) and lowering it requires
-`CAP_SYS_RESOURCE`, which the pod doesn't have — every write failed.
-
-Under DinD the workers' memory is charged to the *pod's* cgroup, so per-worker
-`--memory=4g` caps can each pass the preflight canary while the sum blows the
-pod limit. The regen step checks `JOBS × 4 GiB + 4 GiB` overhead against the
-visible cgroup limit and emits a workflow warning when the budget doesn't fit.
-
 ## Sharded segments
 
 The regen script only uploads (artifacts, index, tombstones) after a fully
