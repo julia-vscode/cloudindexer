@@ -96,6 +96,7 @@ jobs:
       used: ${{ steps.gate.outputs.used }}
       planned: ${{ steps.gate.outputs.planned }}
       pending: ${{ steps.gate.outputs.pending }}
+      budget: ${{ steps.gate.outputs.budget }}
     steps:
       - name: Generate shard list
         id: gen
