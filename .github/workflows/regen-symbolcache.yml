@@ -111,7 +111,7 @@ jobs:
           echo "Sweeping in $SHARDS sequential segments"
 
       - name: Check out cloudindexer
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Verify gate credentials are set
         run: |
