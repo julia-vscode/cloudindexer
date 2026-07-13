@@ -15,6 +15,12 @@ name: Regenerate symbol cache
 # to lose an entire night's work -- with segments, each slice is uploaded
 # before the next starts, and a killed pod costs at most one segment.
 #
+# Before anything runs, a budget gate (scripts/r2_budget_gate.sh, in the plan
+# job) checks that month-to-date R2 Class A operations plus this run's upper
+# bound fit in the free tier's 1M/month allowance; if not, the regen jobs are
+# skipped. Requires the CLOUDFLARE_ANALYTICS_TOKEN secret (Account
+# Analytics:Read).
+#
 # Runs on a self-hosted runner (label: cloudindexer). See
 # docs/self-hosted-runner.md for runner prerequisites and setup.
 
@@ -54,16 +60,42 @@ permissions:
 
 jobs:
   plan:
-    # Tiny setup job: expands the `shards` count into the JSON list the matrix
-    # below needs (workflow expressions can't generate ranges).
+    # Setup + budget gate. Expands the `shards` count into the JSON list the
+    # matrix below needs (workflow expressions can't generate ranges), and
+    # runs scripts/r2_budget_gate.sh: regen only starts when month-to-date R2
+    # Class A ops + this run's upper bound fit in the free-tier budget.
+    # Fail-closed — if the gate can't determine usage, this job fails and
+    # regen never runs.
     runs-on:
       group: cloudindexer-self-hosted-32vcpu-64gb
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       SHARDS: ${{ inputs.shards || '10' }}
+      JW_REF: main
+      R2_BUCKET: ${{ vars.R2_BUCKET || 'symbolcache' }}
+      REGEN_MODE: ${{ inputs.mode || 'incremental' }}
+      SWEEP_ARGS: ${{ inputs.sweep_args || '--newest 3' }}
+      R2_CLASSA_BUDGET: ${{ vars.R2_CLASSA_BUDGET || '1000000' }}
+      R2_CLASSA_MARGIN: ${{ vars.R2_CLASSA_MARGIN || '10000' }}
+      CLOUDFLARE_ANALYTICS_TOKEN: ${{ secrets.CLOUDFLARE_ANALYTICS_TOKEN }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      # Same env-var-defined rclone remote as the regen job (the gate
+      # downloads index.tar.gz + tombstones.txt.gz to build its done set).
+      RCLONE_CONFIG_R2_TYPE: s3
+      RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+      RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      RCLONE_CONFIG_R2_REGION: auto
+      RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+      RCLONE_CONFIG_R2_ACL: private
     outputs:
       list: ${{ steps.gen.outputs.list }}
       total: ${{ steps.gen.outputs.total }}
+      proceed: ${{ steps.gate.outputs.proceed }}
+      used: ${{ steps.gate.outputs.used }}
+      planned: ${{ steps.gate.outputs.planned }}
+      pending: ${{ steps.gate.outputs.pending }}
     steps:
       - name: Generate shard list
         id: gen
@@ -77,8 +109,74 @@ jobs:
           echo "list=[$(seq -s, 0 $((SHARDS - 1)))]" >> "$GITHUB_OUTPUT"
           echo "Sweeping in $SHARDS sequential segments"
 
+      - name: Check out cloudindexer
+        uses: actions/checkout@v4
+
+      - name: Verify gate credentials are set
+        run: |
+          set -euo pipefail
+          if [[ -z "${CLOUDFLARE_ANALYTICS_TOKEN:-}" || -z "${R2_ACCOUNT_ID:-}" ]]; then
+            echo "Missing gate secrets (CLOUDFLARE_ANALYTICS_TOKEN / R2_ACCOUNT_ID)" >&2
+            exit 1
+          fi
+
+      - name: Clone latest JuliaWorkspaces.jl
+        run: |
+          set -euo pipefail
+          rm -rf JuliaWorkspaces.jl
+          git clone --depth 1 --branch "$JW_REF" \
+            https://github.com/julia-vscode/JuliaWorkspaces.jl.git JuliaWorkspaces.jl
+          echo "JW_DIR=$PWD/JuliaWorkspaces.jl" >> "$GITHUB_ENV"
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v3
+        with:
+          # Matches the checked-in Manifest (julia_version = 1.12.5).
+          version: "1.12"
+
+      - name: Install rclone and jq
+        run: |
+          set -euo pipefail
+          # Don't use rclone from apt: Ubuntu LTS pins old builds (24.04 ships
+          # 1.60.1 from 2022) that predate most of rclone's Cloudflare R2
+          # compatibility work, and every upload fails with "501
+          # NotImplemented". Install the current stable release instead.
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends jq curl unzip
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version
+          jq --version
+
+      - name: Instantiate package project
+        run: |
+          set -euo pipefail
+          julia --project="$JW_DIR" -e 'using Pkg; Pkg.instantiate()'
+
+      - name: Download General registry
+        run: |
+          set -euo pipefail
+          # Unpacked so RegistryInstance can read it directly (same pattern as
+          # run_cloudindex_docker.sh). Trailing ':' appends the default depots
+          # so Pkg itself doesn't recompile from scratch.
+          REGDEPOT="$RUNNER_TEMP/regdepot"
+          mkdir -p "$REGDEPOT"
+          JULIA_DEPOT_PATH="$REGDEPOT:" JULIA_PKG_UNPACK_REGISTRY=true \
+            julia --startup-file=no -e 'using Pkg; Pkg.Registry.add("General")'
+          test -f "$REGDEPOT/registries/General/Registry.toml"
+          echo "REGISTRY=$REGDEPOT/registries/General" >> "$GITHUB_ENV"
+
+      - name: R2 Class A budget gate
+        id: gate
+        run: |
+          set -euo pipefail
+          REMOTE="r2:$R2_BUCKET" bash scripts/r2_budget_gate.sh
+
   regen:
     needs: plan
+    # Skipped (not failed) when the budget gate says the run wouldn't fit in
+    # the R2 free tier's monthly Class A allowance.
+    if: needs.plan.outputs.proceed == 'true'
     # One sweep segment per matrix job, strictly sequential. Sequencing
     # matters twice over: the regen script assumes single-flight access to the
     # bucket, and each segment downloads an index that already contains the
