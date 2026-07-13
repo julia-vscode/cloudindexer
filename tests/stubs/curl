@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# curl stub: exits STUB_CURL_EXIT if nonzero, else cats STUB_CURL_RESPONSE.
+set -u
+if [[ "${STUB_CURL_EXIT:-0}" != 0 ]]; then
+    exit "$STUB_CURL_EXIT"
+fi
+cat "${STUB_CURL_RESPONSE:?STUB_CURL_RESPONSE not set}"
