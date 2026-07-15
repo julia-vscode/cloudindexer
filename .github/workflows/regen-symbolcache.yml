@@ -42,7 +42,7 @@ on:
       shards:
         description: "Number of sequential sweep segments; each uploads its results before the next starts"
         type: string
-        default: "10"
+        default: "4"
 
 # Single-flight: the regen script assumes the scheduler serializes runs.
 concurrency:
