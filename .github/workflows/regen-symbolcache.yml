@@ -53,6 +53,23 @@ permissions:
   contents: read
 
 jobs:
+  keepalive:
+    # GitHub auto-disables scheduled workflows after 60 days without repo
+    # activity, and scheduled runs don't count. Re-enabling an already-enabled
+    # workflow resets that timer, so every scheduled run does it. Kept on a
+    # GitHub-hosted runner and independent of the regen jobs so it still fires
+    # when the self-hosted pool is unavailable or a segment fails.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-enable this workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/regen-symbolcache.yml/enable"
+
   plan:
     # Tiny setup job: expands the `shards` count into the JSON list the matrix
     # below needs (workflow expressions can't generate ranges).
